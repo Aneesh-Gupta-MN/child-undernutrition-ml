@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -41,6 +42,14 @@ NUMERIC = ['b19', 'bord', 'v136']
 CATEGORICAL = [x for x in FEATURES if x not in NUMERIC]
 DESIGN = ['v005', 'v021', 'v022', 'v024', 'v001', 'v002']
 REQUIRED = FEATURES + DESIGN + ['caseid', 'bidx', 'b5', 'b9', 'hw70', 'hw1']
+DERIVED_INDIA_KR_COLUMNS = {
+    'child_age_months': 'b19', 'child_sex': 'b4', 'birth_order': 'bord',
+    'mother_education': 'v106', 'household_size': 'v136',
+    'drinking_water_source': 'v113', 'toilet_type': 'v116',
+    'residence_type': 'v025', 'sample_weight_x1000000': 'v005',
+    'psu': 'v001', 'strata': 'v022', 'state_code': 'v024',
+    'height_for_age_zscore_x100': 'hw70',
+}
 MISSING_LABEL = re.compile(r"don't know|do not know|unknown|missing|not applicable|refus|no response|inconsistent|flagged", re.I)
 ALLOWED = {'b4': [1, 2], 'v106': [0, 1, 2, 3], 'v025': [1, 2]}
 SCHEMA_VERSION = 1
@@ -75,12 +84,14 @@ def json_write(path, obj):
 
 
 def read_dataset(source):
-    """Only an original Stata KR file or a ZIP containing one KR DTA is accepted."""
+    """Read a numeric-code KR CSV, original Stata file, or KR Stata ZIP."""
     source = Path(source)
     if not source.is_file():
         raise ValueError('The uploaded file is missing.')
     with source.open('rb') as handle:
         fingerprint = hashlib.file_digest(handle, 'sha256').hexdigest()
+    if source.suffix.lower() == '.csv':
+        return read_csv_dataset(source, fingerprint)
     with tempfile.TemporaryDirectory(prefix='nfhs-read-') as temp:
         data_path = source
         if source.suffix.lower() == '.zip':
@@ -97,7 +108,7 @@ def read_dataset(source):
                 with archive.open(member) as src, data_path.open('wb') as dst:
                     shutil.copyfileobj(src, dst)
         elif source.suffix.lower() != '.dta':
-            raise ValueError('Upload the Stata .dta file or its KR ZIP archive.')
+            raise ValueError('Upload a CSV, Stata .dta file, or KR Stata ZIP archive.')
         _, meta = pyreadstat.read_dta(str(data_path), metadataonly=True)
         names = {c.lower(): c for c in meta.column_names}
         if len(names) != len(meta.column_names):
@@ -113,6 +124,79 @@ def read_dataset(source):
         'file_label': meta.file_label,
         'labels': {c: meta.column_names_to_labels.get(names[c]) for c in REQUIRED},
         'value_labels': {c: {str(k): v for k, v in meta.variable_value_labels.get(names[c], {}).items()} for c in REQUIRED},
+    }
+    return data, metadata
+
+
+def read_csv_dataset(source, fingerprint):
+    """CSV has no Stata value labels: blank missing responses before export."""
+    try:
+        with source.open('r', encoding='utf-8-sig', newline='') as handle:
+            sample = handle.read(65536)
+            if not sample.strip():
+                raise ValueError('The CSV is empty.')
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=',;\t')
+            except csv.Error:
+                dialect = csv.excel
+            handle.seek(0)
+            reader = csv.reader(handle, dialect, strict=True)
+            headers = next(reader)
+            normalized = [name.strip().lower() for name in headers]
+            if len(set(normalized)) != len(normalized):
+                raise ValueError('Duplicate CSV column names after trimming spaces and normalizing case.')
+            source_kind = 'canonical_csv'
+            absent = sorted(set(REQUIRED) - set(normalized))
+            derived_absent = sorted(set(DERIVED_INDIA_KR_COLUMNS) - set(normalized))
+            if absent and not derived_absent:
+                source_kind = 'derived_india_kr_csv'
+            elif absent:
+                raise ValueError('CSV is missing required NFHS columns: ' + ', '.join(absent) +
+                                 '. This app also supports the supplied derived India KR format; required columns missing from that format: ' + ', '.join(derived_absent) + '.')
+            for row in reader:
+                if row and len(row) != len(headers):
+                    raise ValueError(f'CSV row ending at line {reader.line_num} has {len(row)} fields; expected {len(headers)}. Check delimiters and quoting.')
+        names = dict(zip(normalized, headers))
+        requested = REQUIRED if source_kind == 'canonical_csv' else list(DERIVED_INDIA_KR_COLUMNS)
+        data = pd.read_csv(source, encoding='utf-8-sig', dialect=dialect,
+                           usecols=[names[col] for col in requested], dtype=str,
+                           keep_default_na=False, na_values=['', '.', 'NA', 'N/A', 'NaN', 'nan', 'NULL', 'null'])
+        data.columns = [col.strip().lower() for col in data.columns]
+        if source_kind == 'derived_india_kr_csv':
+            data = data.rename(columns=DERIVED_INDIA_KR_COLUMNS)
+            data['v021'] = data['v001']
+            data['v002'] = 1
+            # Generated IDs preserve one row per supplied record. The source lacks
+            # household identifiers, so all split protection uses whole PSUs.
+            data['caseid'] = pd.Series(np.arange(1, len(data) + 1), index=data.index).astype(str)
+            data['bidx'] = 1
+            data['b5'] = 1
+            data['b9'] = np.nan
+            data['hw1'] = data['b19']
+        for col in REQUIRED:
+            data[col] = data[col].astype('string').str.strip().replace('', np.nan)
+            if col != 'caseid':
+                try:
+                    data[col] = pd.to_numeric(data[col], errors='raise')
+                except ValueError as exc:
+                    raise ValueError(f'CSV column {col} must contain original numeric NFHS codes or blank cells, not category labels.') from exc
+    except (UnicodeError, csv.Error, pd.errors.ParserError) as exc:
+        raise ValueError('Cannot read the CSV. Use UTF-8 encoding and consistent comma, semicolon or tab delimiters.') from exc
+    synthetic = data.caseid.fillna('').str.startswith('SYNTHETIC_').all() and len(data) > 0
+    derived_notes = [
+        'Derived India KR CSV: child-level identifiers, household identifiers, living-status, mother co-residence and separate measurement-age fields were not supplied.',
+        'The analysis uses all supplied children aged 6–59 months with a plausible HAZ outcome. It cannot independently reproduce the raw KR eligibility restrictions.',
+        'All children in the same PSU are kept together in fitting, calibration, validation and test partitions because household IDs are unavailable.',
+    ] if source_kind == 'derived_india_kr_csv' else [
+        'CSV contains no value-label codebook. Special missing responses must be blanked before upload. No special numeric missing codes are guessed.'
+    ]
+    metadata = {
+        'filename': source.name, 'sha256': fingerprint, 'format': 'csv',
+        'source_kind': source_kind,
+        'file_label': 'SYNTHETIC SOFTWARE TEST ONLY' if synthetic else None,
+        'labels': {col: None for col in REQUIRED},
+        'value_labels': {col: {} for col in REQUIRED},
+        'notes': derived_notes,
     }
     return data, metadata
 
@@ -166,13 +250,19 @@ def clean_cohort(data, metadata):
     if len(plausible) and plausible.abs().max() <= 6:
         raise ValueError('hw70 appears already scaled; this workflow requires original HAZ × 100.')
     flow = {'input_records': len(data)}
-    rules = [
-        ('living', data.b5.eq(1)),
-        ('age_6_to_59_months', data.b19.between(6, 59) & data.b19.mod(1).eq(0)),
-        ('living_with_interviewed_mother', data.b9.eq(0)),
-        ('valid_height_for_age', data.hw70.between(-600, 600)),
-        ('matching_measurement_age', data.hw1.eq(data.b19)),
-    ]
+    if metadata.get('source_kind') == 'derived_india_kr_csv':
+        rules = [
+            ('age_6_to_59_months', data.b19.between(6, 59) & data.b19.mod(1).eq(0)),
+            ('valid_height_for_age', data.hw70.between(-600, 600)),
+        ]
+    else:
+        rules = [
+            ('living', data.b5.eq(1)),
+            ('age_6_to_59_months', data.b19.between(6, 59) & data.b19.mod(1).eq(0)),
+            ('living_with_interviewed_mother', data.b9.eq(0)),
+            ('valid_height_for_age', data.hw70.between(-600, 600)),
+            ('matching_measurement_age', data.hw1.eq(data.b19)),
+        ]
     keep = pd.Series(True, index=data.index)
     exclusions = {}
     for name, mask in rules:
@@ -189,7 +279,7 @@ def clean_cohort(data, metadata):
             raise ValueError(f'Invalid survey identifier: {col}.')
     cohort['state'] = cohort.v024.astype(int)
     cohort['psu'] = cohort.v024.astype(int).astype(str) + ':' + cohort.v001.astype(int).astype(str)
-    cohort['household'] = cohort.psu + ':' + cohort.v002.astype(int).astype(str)
+    cohort['household'] = cohort.psu if metadata.get('source_kind') == 'derived_india_kr_csv' else cohort.psu + ':' + cohort.v002.astype(int).astype(str)
     cohort['stratum'] = cohort.v024.astype(int).astype(str) + ':' + cohort.v022.astype(int).astype(str)
     # A state/cluster must map to a single PSU and stratum, not mixed survey releases.
     if (cohort.groupby('psu').v021.nunique() > 1).any() or (cohort.groupby('psu').stratum.nunique() > 1).any():
@@ -211,6 +301,7 @@ def clean_cohort(data, metadata):
             'Review value labels and the sampling appendix for the actual NFHS release.',
         ],
     }
+    audit['cautions'].extend(metadata.get('notes', []))
     return cohort, x, audit
 
 
@@ -397,6 +488,7 @@ def report_text(summary):
     lines += ['', summary['uncertainty']['method'], '',
               f"Singleton strata: {summary['uncertainty']['singleton_strata']}; these strata cannot contribute resampling variation.", '',
               '## Methods and limits', '',
+              *['- ' + note for note in summary['source'].get('notes', [])],
               '- Four disjoint sets: model fitting, probability calibration, model/threshold selection, final testing. PSUs and households never cross sets.',
               '- Numeric imputation, scaling and categorical encoding are learned on the fitting set only. No oversampling. Survey weights enter model fitting, calibration and weighted evaluation.',
               '- Fixed model settings; no test-driven tuning. Logistic regression, an age-spline baseline, shallow XGBoost and a prevalence baseline are compared.',

@@ -8,7 +8,7 @@ The complete local application is implemented. The real NFHS dataset has not bee
 
 Open **http://127.0.0.1:8501** while the local app is running.
 
-1. Choose **Upload NFHS data** and upload the original India NFHS-5 Children's Recode (KR) Stata `.dta` file or its KR ZIP archive.
+1. Choose **Upload NFHS data** and upload the India NFHS-5 Children's Recode (KR) dataset as `.csv`, original Stata `.dta`, or a KR Stata ZIP archive.
 2. Review the eligible-child count. Choose geographic validation (recommended for a national file) or internal PSU validation for a restricted-area file. You can name test states before training; otherwise the fixed seed selects them.
 3. Confirm that the file uses original variable codes and unmodified `hw70` units.
 4. Click **Train and generate my model**.
@@ -31,6 +31,16 @@ python3 -m venv .venv
 ```
 
 The app binds to this computer only. Uploads are processed locally, temporary upload copies are removed after inspection/training, and completed outputs remain under `runs/`. No child-level training records are included in the download. Generated reports and artifacts still need normal access controls.
+
+### CSV uploads
+
+Use UTF-8 (with or without a BOM), one child per row, and comma, semicolon or tab delimiters. Column names are trimmed and matched without case sensitivity. Extra columns are ignored. Child IDs retain leading zeros. The app provides an empty CSV template listing all required fields:
+
+`b19, b4, bord, v106, v136, v113, v116, v025, v005, v021, v022, v024, v001, v002, caseid, bidx, b5, b9, hw70, hw1`
+
+Keep original numeric codes and units (`hw70` = z-score × 100; `v005` = original survey weight). CSV does not retain Stata value labels, so convert special missing-response codes to blank cells using your codebook before upload. The importer does not guess that every 9/99 code is missing. Blanks, `.`, `NA`, `N/A`, `NaN` and `NULL` are accepted as missing values. A CSV exported with words such as “male” instead of numeric category codes must be re-exported with numeric codes. Missing required fields, duplicate headers and malformed rows produce an actionable error before training. CSV codebook limitations are included in the generated report.
+
+The supplied `india_kr.csv` derived extract is supported directly. Its headers include `child_age_months`, `child_sex`, `birth_order`, `mother_education`, `household_size`, `drinking_water_source`, `toilet_type`, `residence_type`, `state_code`, `psu`, `strata`, `sample_weight_x1000000`, and `height_for_age_zscore_x100`. It lacks raw child/household IDs, living status, mother co-residence and separate measurement age. The app uses its supplied child rows aged 6–59 months with valid HAZ, and keeps entire PSUs together. These restrictions are written into the report and must be stated in your academic work.
 
 ## What the download contains
 

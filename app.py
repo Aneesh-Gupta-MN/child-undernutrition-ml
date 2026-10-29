@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from demo_data import create_demo
-from pipeline import Config, read_dataset, clean_cohort, train
+from pipeline import Config, REQUIRED, read_dataset, clean_cohort, train
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title='Nursing Research · Model Studio', page_icon='🌱', layout='wide')
@@ -25,12 +25,18 @@ st.info('Research task: estimate current stunting among children aged 6–59 mon
 mode = st.radio('Data source', ['Upload NFHS data', 'Try a synthetic demonstration'], horizontal=True)
 upload = None
 if mode == 'Upload NFHS data':
-    upload = st.file_uploader('Children’s Recode file', type=['dta', 'zip'], max_upload_size=1024,
-                              help='Use the original Stata KR dataset or its ZIP. Aggregate factsheets and already-transformed files are not supported.')
+    upload = st.file_uploader('Children’s Recode file (CSV, Stata or ZIP)', type=['csv', 'dta', 'zip'], max_upload_size=1024,
+                              help='CSV must use NFHS column names and original numeric codes. ZIP must contain a Stata KR file. Aggregate factsheets and already-transformed files are not supported.')
+    with st.expander('CSV format and required columns'):
+        st.write('Use one child per row, NFHS variable names as column headers, and original numeric category codes. Keep height-for-age (hw70) as z-score × 100. Column names may be uppercase or lowercase; additional columns are ignored.')
+        st.write('CSV does not preserve the original codebook. Convert special missing-response codes (such as “don’t know” or “refused”) to blank cells using your codebook before uploading. Missing outcomes may also be blank; they will be excluded.')
+        st.code(','.join(REQUIRED), language=None)
+        st.download_button('Download empty CSV template', ','.join(REQUIRED) + '\n', file_name='nfhs-column-template.csv', mime='text/csv')
+        st.caption('The supplied `india_kr.csv` layout is also supported: child_age_months, child_sex, birth_order, mother_education, household_size, drinking_water_source, toilet_type, residence_type, state_code, psu, strata, sample_weight_x1000000, and height_for_age_zscore_x100.')
     if upload is None:
         st.caption('The file stays on this computer when you use this locally running app. No external service receives it.')
         st.stop()
-    fingerprint = hashlib.sha256(upload.getbuffer()).hexdigest()
+    fingerprint = 'csv-support-v1:' + Path(upload.name).suffix.lower() + ':' + hashlib.sha256(upload.getbuffer()).hexdigest()
 else:
     st.warning('Synthetic demonstration only. Its model and scores are for checking the software, not academic findings.')
     fingerprint = 'synthetic-demo-v1'
@@ -45,7 +51,7 @@ if 'inspection' not in st.session_state and 'inspection_error' not in st.session
         with st.spinner('Checking file structure and eligible children…'):
             with tempfile.TemporaryDirectory(prefix='nfhs-inspect-') as temp:
                 if upload is not None:
-                    path = Path(temp) / ('upload.zip' if upload.name.lower().endswith('.zip') else 'upload.dta')
+                    path = Path(temp) / ('upload' + Path(upload.name).suffix.lower())
                     path.write_bytes(upload.getbuffer())
                 else:
                     path = create_demo(Path(temp) / 'SYNTHETIC_KR.dta')
@@ -61,6 +67,12 @@ if 'inspection_error' in st.session_state:
     st.stop()
 
 inspection = st.session_state.inspection
+is_csv = inspection['meta'].get('format') == 'csv'
+is_derived_csv = inspection['meta'].get('source_kind') == 'derived_india_kr_csv'
+if is_csv:
+    st.info('CSV loaded. Category labels are unavailable; original numeric codes are used. Special missing responses must already be blank cells.')
+if is_derived_csv:
+    st.warning('Derived India KR CSV loaded. Household IDs and some raw eligibility fields are unavailable, so the report will use the supplied child rows and keep entire PSUs together. Read this limitation in the final report.')
 audit = inspection['audit']
 a, b, c = st.columns(3)
 a.metric('Eligible children', f"{audit['eligible']:,}")
@@ -89,7 +101,11 @@ with st.expander('Research settings'):
     sensitivity = st.slider('Sensitivity target on validation data', min_value=50, max_value=99, value=80, format='%d%%')
     repeats = st.selectbox('Bootstrap repetitions for uncertainty', [200, 500, 1000], index=0)
     st.caption('The winner has the lowest validation Brier score, which measures probability error. All models use fixed settings. The final test set is not used to choose the model or threshold.')
-confirmed = st.checkbox('This is the original NFHS-5 KR file with unmodified variable codes and height-for-age stored as z-score × 100.', value=(mode == 'Try a synthetic demonstration'))
+confirmation = ('This CSV uses original NFHS numeric codes, height-for-age as z-score × 100, and blank cells for special missing responses.'
+                if is_csv else 'This is the original NFHS-5 KR file with unmodified variable codes and height-for-age stored as z-score × 100.')
+if is_derived_csv:
+    confirmation = 'I understand this derived CSV omits some raw KR fields, and I will report the cohort and household-ID limitation.'
+confirmed = st.checkbox(confirmation, value=(mode == 'Try a synthetic demonstration'))
 config = Config(seed=int(seed), split_mode=split_mode, test_states=tuple(selected_states),
                 target_sensitivity=sensitivity/100, bootstrap_repeats=repeats, synthetic=mode == 'Try a synthetic demonstration')
 settings_signature = repr(config)
@@ -108,7 +124,7 @@ if st.button('Train and generate my model', type='primary', disabled=not confirm
                 st.write(message)
             with tempfile.TemporaryDirectory(prefix='nfhs-upload-') as temp:
                 if upload is not None:
-                    path = Path(temp) / ('upload.zip' if upload.name.lower().endswith('.zip') else 'upload.dta')
+                    path = Path(temp) / ('upload' + Path(upload.name).suffix.lower())
                     path.write_bytes(upload.getbuffer())
                 else:
                     path = create_demo(Path(temp) / 'SYNTHETIC_KR.dta')

@@ -136,6 +136,90 @@ class PipelineTests(unittest.TestCase):
         threshold = choose_threshold(y, p, w, .8)
         self.assertGreaterEqual(w[(y == 1) & (p >= threshold)].sum()/w[y == 1].sum(), .8)
 
+    def test_csv_complete_training_and_prediction(self):
+        path = self.root / 'numeric.csv'
+        raw = self.raw.copy()
+        raw.loc[raw.v113.eq(99), 'v113'] = np.nan
+        raw.to_csv(path, index=False)
+        original = path.read_bytes()
+        output = self.root / 'csv-trained'
+        summary = train(path, output, self.config)
+        self.assertEqual(summary['source']['format'], 'csv')
+        self.assertTrue(summary['config']['synthetic'])
+        self.assertEqual(summary['selected_model'], self.summary['selected_model'])
+        self.assertEqual(summary['audit']['eligible'], len(raw))
+        self.assertEqual(summary['audit']['predictor_missing_counts']['v113'], int(self.raw.v113.eq(99).sum()))
+        bundle = joblib.load(output / 'model.joblib')
+        examples = json.loads((output / 'prediction-example.json').read_text())
+        self.assertEqual(len(predict_records(bundle, examples)), 1)
+        self.assertIn('CSV contains no value-label codebook', (output / 'report.md').read_text())
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_derived_india_kr_csv_mapping(self):
+        raw = self.raw.copy()
+        derived = pd.DataFrame({
+            'child_age_months': raw.b19,
+            'child_sex': raw.b4,
+            'birth_order': raw.bord,
+            'mother_education': raw.v106,
+            'household_size': raw.v136,
+            'drinking_water_source': raw.v113,
+            'toilet_type': raw.v116,
+            'residence_type': raw.v025,
+            'state_code': raw.v024,
+            'psu': raw.v001,
+            'strata': raw.v022,
+            'sample_weight_x1000000': raw.v005,
+            'height_for_age_zscore_x100': raw.hw70,
+        })
+        path = self.root / 'india_kr.csv'
+        derived.to_csv(path, index=False)
+        data, metadata = read_dataset(path)
+        cohort, _, audit = clean_cohort(data, metadata)
+        self.assertEqual(metadata['source_kind'], 'derived_india_kr_csv')
+        self.assertEqual(len(cohort), len(derived))
+        self.assertEqual(cohort.household.nunique(), cohort.psu.nunique())
+        self.assertNotIn('living_with_interviewed_mother', audit['cohort_flow'])
+        self.assertTrue(any('household identifiers' in note for note in audit['cautions']))
+
+    def test_csv_bom_headers_delimiters_and_identifiers(self):
+        raw = self.raw.iloc[:4].copy()
+        raw['caseid'] = ['00001', '00001', '00002', '00002']
+        raw['irrelevant'] = 'ignored'
+        raw.columns = ['  ' + col.upper() + '  ' for col in raw.columns]
+        for delimiter in [',', ';', '\t']:
+            path = self.root / 'header-variation.csv'
+            raw.to_csv(path, index=False, sep=delimiter, encoding='utf-8-sig')
+            result, _ = read_dataset(path)
+            self.assertEqual(result.caseid.tolist(), ['00001', '00001', '00002', '00002'])
+            self.assertNotIn('irrelevant', result.columns)
+            self.assertEqual(result.b19.tolist(), self.raw.b19.iloc[:4].tolist())
+
+    def test_csv_rejects_bad_schema_labels_and_rows(self):
+        path = self.root / 'invalid.csv'
+        self.raw.drop(columns='v005').to_csv(path, index=False)
+        with self.assertRaisesRegex(ValueError, 'required NFHS columns: v005'):
+            read_dataset(path)
+        raw = self.raw.iloc[:4].copy()
+        raw['b4'] = 'male'
+        raw.to_csv(path, index=False)
+        with self.assertRaisesRegex(ValueError, 'b4 must contain original numeric'):
+            read_dataset(path)
+        text = self.raw.iloc[:4].to_csv(index=False)
+        lines = text.splitlines()
+        lines[0] += ',B19'
+        path.write_text('\n'.join(lines))
+        with self.assertRaisesRegex(ValueError, 'Duplicate CSV column'):
+            read_dataset(path)
+        lines = text.splitlines()
+        lines[2] += ',extra'
+        path.write_text('\n'.join(lines))
+        with self.assertRaisesRegex(ValueError, 'fields; expected'):
+            read_dataset(path)
+        path.write_text('')
+        with self.assertRaisesRegex(ValueError, 'CSV is empty'):
+            read_dataset(path)
+
 
 if __name__ == '__main__':
     unittest.main()
