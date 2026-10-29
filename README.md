@@ -2,7 +2,7 @@
 
 Upload an approved India NFHS-5 Children's Recode dataset, validate the cohort, compare reproducible models, and download the selected trained model with its evaluation report.
 
-The complete local application is implemented. The real NFHS dataset has not been downloaded; end-to-end verification uses labelled synthetic records only.
+The complete local application is implemented. The supplied derived `india_kr.csv` extract has been verified through the full upload, training, evaluation, report, export, and prediction workflow. The official raw KR release is not stored in this repository, and synthetic fixtures remain the basis of the automated software tests.
 
 ## Use the app
 
@@ -86,6 +86,12 @@ Survey weights enter fitting, calibration and evaluation. Approximate uncertaint
 .venv/bin/python pipeline.py --input data/raw/YOUR_KR_FILE.dta --output runs/my-first-real-run
 ```
 
+For the supported derived extract:
+
+```bash
+.venv/bin/python pipeline.py --input /path/to/india_kr.csv --output runs/india-kr-run
+```
+
 Optional controls include `--test-states 29`, `--split-mode grouped`, `--seed 42`, and `--bootstrap-repeats 200`. State codes must be checked in the actual release. Choose settings before examining outcomes; repeatedly optimizing a test split invalidates its role as a holdout.
 
 Run the software checks:
@@ -94,13 +100,13 @@ Run the software checks:
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The tests cover label/age boundaries, special codes, duplicates, invalid weights, household/state separation, training-only preprocessing, missing/unseen categories, ZIP input, artifact round-trip prediction and overwrite protection. The Streamlit controls and complete synthetic training flow are also checked with its application-testing framework.
+The 16 tests cover label/age boundaries, special codes, duplicates, invalid weights, household/state separation, training-only preprocessing, canonical and derived CSV mapping, delimiter and encoding variations, ZIP input, artifact round-trip prediction and overwrite protection. The Streamlit controls and complete synthetic training flow are also checked with its application-testing framework. The supplied derived CSV has additionally completed a temporary end-to-end compatibility run; no derived child-level data or provisional performance result is committed to the repository.
 
 `audit_data.py` remains available for a separate, preliminary audit. Its provisional cohort differs from the finalized conservative training cohort, so its counts should not be substituted for the training report.
 
 ## Data access and limitations
 
-The real dataset is still pending. Obtain **India 2019–21 → Children's Recode (KR) → Stata** through your approved [DHS research account](https://dhsprogram.com/data/dataset/India_Standard-DHS_2020.cfm?flag=0). See `access-request.md` for the proposed study description and the [catalogue access conditions](https://microdata.worldbank.org/catalog/4482).
+The supplied `india_kr.csv` is a derived NFHS-style extract and can be used with the documented limitations. For reproducibility against the official release and access to omitted raw eligibility and household fields, obtain **India 2019–21 → Children's Recode (KR) → Stata** through an approved [DHS research account](https://dhsprogram.com/data/dataset/India_Standard-DHS_2020.cfm?flag=0). See `access-request.md` for the proposed study description and the [catalogue access conditions](https://microdata.worldbank.org/catalog/4482).
 
 This is a reproducible research prototype, not a clinically validated screening or forecasting system. A completed training run does not establish useful discrimination, calibration in the college's setting, or improved clinical outcomes. Read the actual report, including negative findings. Scores must not determine eligibility for measurement or care.
 
